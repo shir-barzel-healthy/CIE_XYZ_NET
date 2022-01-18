@@ -133,7 +133,7 @@ if __name__ == "__main__":
             xyz_img = utils.from_bgr2rgb(xyz_img)  # convert from BGR to RGB
             xyz_img = utils.im2double(xyz_img)  # convert to double
 
-            psnr_xyz = utils.PSNR(xyz_img, output_XYZ)
+            psnr_xyz = utils.PSNR(xyz_img * 255, output_XYZ * 255)
             print(f"PSNR xyz: {psnr_xyz}")
             psnr_xyz_list.append(psnr_xyz)
 
