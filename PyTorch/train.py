@@ -21,6 +21,7 @@ from torch import optim
 from tqdm import tqdm
 from src import sRGB2XYZ
 import src.utils as utls
+from src import utils
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -34,18 +35,21 @@ from torch.utils.data import DataLoader
 def train_net(net, device, dir_img, dir_gt, val_dir, val_dir_gt, epochs=300,
               batch_size=4, lr=0.0001, lrdf=0.5, lrdp=75, l2reg=0.001,
               chkpointperiod=1, patchsz=256, validationFrequency=10,
-              save_cp=True):
+              save_cp=True, state='orig'):
+
+    if state == 'orig':
+        batch_size = batch_size * 2
 
     dir_checkpoint = 'checkpoints/'
 
-    train = BasicDataset(dir_img, dir_gt, patch_size=patchsz)
-    val = BasicDataset(val_dir, val_dir_gt, patch_size=patchsz)
+    train = BasicDataset(dir_img, dir_gt, patch_size=patchsz, state=state)
+    val = BasicDataset(val_dir, val_dir_gt, patch_size=patchsz, state=state)
     train_loader = DataLoader(train, batch_size=batch_size, shuffle=True,
                               num_workers=8, pin_memory=True)
     val_loader = DataLoader(val, batch_size=batch_size, shuffle=False,
                             num_workers=8, pin_memory=True, drop_last=True)
     if use_tb:
-        writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size}')
+        writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size}_state_{state}')
     global_step = 0
 
     logging.info(f'''Starting training:
@@ -69,52 +73,89 @@ def train_net(net, device, dir_img, dir_gt, val_dir, val_dir_gt, epochs=300,
     for epoch in range(epochs):
         net.train()
 
-        epoch_loss = 0
+        epoch_loss_imgs = 0
+        epoch_loss_m = 0
         with tqdm(total=len(train), desc=f'Epoch {epoch + 1}/{epochs}',
                   unit='img') as pbar:
             for batch in train_loader:
                 imgs = batch['image']
                 xyz_gt = batch['gt_xyz']
-                assert imgs.shape[1] == 3, (
+                if state == 'orig':
+                    assert_val_imgs = imgs.shape[1] == 3
+                    assert_val_xyz = xyz_gt.shape[1] == 3
+                elif state == 'self-sup':
+                    assert_val_imgs = imgs.shape[2] == 3
+                    assert_val_xyz = xyz_gt.shape[2] == 3
+                assert assert_val_imgs, (
                     f'Network has been defined with 3 input channels, '
-                    f'but loaded training images have {imgs.shape[1]} channels.'
+                    f'but loaded training images have {imgs.shape}.'
                     f' Please check that the images are loaded correctly.')
 
-                assert xyz_gt.shape[1] == 3, (
+                assert assert_val_xyz, (
                     f'Network has been defined with 3 input channels, '
-                    f'but loaded XYZ images have {xyz_gt.shape[1]} channels. '
+                    f'but loaded XYZ images have {xyz_gt.shape}. '
                     f'Please check that the images are loaded correctly.')
 
                 imgs = imgs.to(device=device, dtype=torch.float32)
                 xyz_gt = xyz_gt.to(device=device, dtype=torch.float32)
+                if state == 'orig':
+                    rec_imgs, rendered_imgs = net(imgs)
+                    loss_imgs = utls.compute_loss(imgs, xyz_gt, rec_imgs, rendered_imgs)
+                elif state == 'self-sup':
+                    rec_1, rend_1, m_inv_1, m_fwd_1, rec_2, rend_2, m_inv_2, m_fwd_2 = net(imgs)
+                    loss_imgs, loss_m = utls.compute_loss_self_sup(imgs, xyz_gt, rec_1, rend_1, m_inv_1,
+                                            m_fwd_1, rec_2, rend_2, m_inv_2, m_fwd_2)
 
-                rec_imgs, rendered_imgs = net(imgs)
-                loss = utls.compute_loss(imgs, xyz_gt, rec_imgs, rendered_imgs)
-
-                epoch_loss += loss.item()
+                epoch_loss_imgs += loss_imgs.item()
+                if state == 'self-sup':
+                    epoch_loss_m += loss_m.item()
 
                 if use_tb:
-                    writer.add_scalar('Loss/train', loss.item(), global_step)
+                    writer.add_scalar('Loss_imgs/train', loss_imgs.item(), epoch)
+                    if state == 'self-sup':
+                        m_fac = 1e5 ## TODO
+                        loss = loss_imgs + m_fac * loss_m
+                        writer.add_scalar('Loss_m/train', loss_m.item(), epoch)
+                        writer.add_scalar('total_loss/train', loss.item(), epoch)
 
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                pbar.set_postfix(**{'loss_imgs (batch)': loss_imgs.item()})
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                if state == 'self-sup':
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                elif state == 'orig':
+                    optimizer.zero_grad()
+                    loss_imgs.backward()
+                    optimizer.step()
+
                 pbar.update(np.ceil(imgs.shape[0]))
                 global_step += 1
 
         if (epoch + 1) % validationFrequency == 0:
-            val_score = vald_net(net, val_loader, device)
-            logging.info('Validation loss: {}'.format(val_score))
+            val_score_imgs, val_score_m, mean_psnr_xyz, mean_psnr_srgb = vald_net(net, val_loader, device, state)
+            logging.info('Validation loss_imgs: {}'.format(val_score_imgs))
+            logging.info('Validation loss_m: {}'.format(val_score_m))
             if use_tb:
                 writer.add_scalar('learning_rate',
-                                  optimizer.param_groups[0]['lr'], global_step)
-                writer.add_scalar('Loss/test', val_score, global_step)
-                writer.add_images('images', imgs, global_step)
-                writer.add_images('rendered-imgs', rendered_imgs, global_step)
-                writer.add_images('rec-xyz', rec_imgs, global_step)
-                writer.add_images('gt-xyz', xyz_gt, global_step)
+                                  optimizer.param_groups[0]['lr'], epoch)
+                writer.add_scalar('Loss_imgs/val', val_score_imgs, epoch)
+                writer.add_scalar('Loss_m/val', val_score_m, epoch)
+                writer.add_scalar('Mean_Val_PSNR_XYZ', mean_psnr_xyz, epoch)
+                writer.add_scalar('Mean_Val_PSNR_SRGB', mean_psnr_srgb, epoch)
+                if state == 'orig':
+                    writer.add_images('images', imgs, epoch)
+                    writer.add_images('rendered-imgs', rendered_imgs, epoch)
+                    writer.add_images('rec-xyz', rec_imgs, epoch)
+                    writer.add_images('gt-xyz', xyz_gt, epoch)
+                elif state == 'self-sup':
+                    writer.add_images('image-1', torch.squeeze(imgs[:, 0, :, :, :]), epoch)
+                    writer.add_images('image-2', torch.squeeze(imgs[:, 1, :, :, :]), epoch)
+                    writer.add_images('rendered-imgs_1', rend_1, epoch)
+                    writer.add_images('rec-xyz_1', rec_1, epoch)
+                    writer.add_images('rendered-imgs_2', rend_2, epoch)
+                    writer.add_images('rec-xyz_2', rec_2, epoch)
+                    writer.add_images('gt-xyz', torch.squeeze(xyz_gt[:, 0, :, :, :]), epoch)
 
         scheduler.step()
 
@@ -124,7 +165,7 @@ def train_net(net, device, dir_img, dir_gt, val_dir, val_dir_gt, epochs=300,
                 logging.info('Created checkpoint directory')
 
             torch.save(net.state_dict(), dir_checkpoint +
-                       f'ciexyznet{epoch + 1}.pth')
+                       f'ciexyznet_{state}_{epoch + 1}.pth')
             logging.info(f'Checkpoint {epoch + 1} saved!')
 
     if not os.path.exists('models'):
@@ -137,39 +178,87 @@ def train_net(net, device, dir_img, dir_gt, val_dir, val_dir_gt, epochs=300,
     logging.info('End of training')
 
 
-def vald_net(net, loader, device):
+def vald_net(net, loader, device, state):
     """Evaluation using MAE"""
     net.eval()
     n_val = len(loader) + 1
-    mae = 0
+    mae_imgs = 0
+    mae_m = 0
+
+    mean_psnr_xyz_list = []
+    mean_psnr_srgb_list = []
 
     with tqdm(total=n_val, desc='Validation round', unit='batch',
               leave=False) as pbar:
         for batch in loader:
             imgs = batch['image']
             xyz_gt = batch['gt_xyz']
-            assert imgs.shape[1] == 3, (
-                f'Network has been defined with 3 input channels, but loaded '
-                f'training images have {imgs.shape[1]} channels. Please check '
-                f'that the images are loaded correctly.')
+            if state == 'orig':
+                assert_val_imgs = imgs.shape[1] == 3
+                assert_val_xyz = xyz_gt.shape[1] == 3
+            elif state == 'self-sup':
+                assert_val_imgs = imgs.shape[2] == 3
+                assert_val_xyz = xyz_gt.shape[2] == 3
+            assert assert_val_imgs, (
+                f'Network has been defined with 3 input channels, '
+                f'but loaded training images have {imgs.shape}.'
+                f' Please check that the images are loaded correctly.')
 
-            assert xyz_gt.shape[1] == 3, (
-                f'Network has been defined with 3 input channels, but loaded '
-                f'XYZ images have {xyz_gt.shape[1]} channels. Please check '
-                f'that the images are loaded correctly.')
+            assert assert_val_xyz, (
+                f'Network has been defined with 3 input channels, '
+                f'but loaded XYZ images have {xyz_gt.shape}. '
+                f'Please check that the images are loaded correctly.')
 
             imgs = imgs.to(device=device, dtype=torch.float32)
             xyz_gt = xyz_gt.to(device=device, dtype=torch.float32)
-
             with torch.no_grad():
-                rec_imgs, rendered_imgs = net(imgs)
-                loss = utls.compute_loss(imgs, xyz_gt, rec_imgs, rendered_imgs)
-                mae = mae + loss
+                if state == 'orig':
+                    rec_imgs, rendered_imgs = net(imgs)
+                    batch_psnr = []
+                    for i in range(rec_imgs.shape[0]):
+                        psnr = utils.PSNR(xyz_gt[i], rec_imgs[i])
+                        batch_psnr.append(psnr)
+                    mean_batch_psnr = np.mean(np.array(batch_psnr))
+                    mean_psnr_list.append(mean_batch_psnr)
+
+                    loss_imgs = utls.compute_loss(imgs, xyz_gt, rec_imgs, rendered_imgs)
+                elif state == 'self-sup':
+                    rec_1, rend_1, m_inv_1, m_fwd_1, rec_2, rend_2, m_inv_2, m_fwd_2 = net(imgs)
+
+                    batch_psnr_xyz = []
+                    batch_psnr_srgb = []
+                    xyz_gt_1 = torch.squeeze(xyz_gt[:, 0, :, :, :])
+                    xyz_gt_2 = torch.squeeze(xyz_gt[:, 1, :, :, :])
+                    imgs_gt_1 = torch.squeeze(imgs[:, 0, :, :, :])
+                    imgs_gt_2 = torch.squeeze(imgs[:, 1, :, :, :])
+
+                    for i in range(rec_1.shape[0]):
+                        psnr_xyz_1 = utils.PSNR(xyz_gt_1[i], rec_1[i])
+                        psnr_xyz_2 = utils.PSNR(xyz_gt_2[i], rec_2[i])
+                        psnr_srgb_1 = utils.PSNR(imgs_gt_1[i], rend_1[i])
+                        psnr_srgb_2 = utils.PSNR(imgs_gt_2[i], rend_2[i])
+                        batch_psnr_xyz.append(psnr_xyz_1)
+                        batch_psnr_xyz.append(psnr_xyz_2)
+                        batch_psnr_srgb.append(psnr_srgb_1)
+                        batch_psnr_srgb.append(psnr_srgb_2)
+                    mean_batch_psnr_xyz = np.mean(np.array(batch_psnr_xyz))
+                    mean_psnr_xyz_list.append(mean_batch_psnr_xyz)
+                    mean_batch_psnr_srgb = np.mean(np.array(batch_psnr_srgb))
+                    mean_psnr_srgb_list.append(batch_psnr_srgb)
+
+                    loss_imgs, loss_m = utls.compute_loss_self_sup(imgs, xyz_gt, rec_1, rend_1, m_inv_1,
+                                        m_fwd_1, rec_2, rend_2, m_inv_2, m_fwd_2)
+                                        
+                mae_imgs = mae_imgs + loss_imgs
+                if state == 'self-sup':
+                    mae_m = mae_m + loss_m
+                else:
+                    mae_m = 0
 
             pbar.update(np.ceil(imgs.shape[0]))
 
     net.train()
-    return mae / n_val
+    return mae_imgs / n_val, mae_m / n_val, np.mean(np.array(mean_psnr_srgb_list)), np.mean(np.array(mean_psnr_xyz_list))
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train CIE XYZ Net.')
@@ -186,7 +275,7 @@ def get_args():
     parser.add_argument('-l', '--load', dest='load', type=str, default=False,
                         help='Load model from a .pth file')
     parser.add_argument('-vf', '--validation-frequency', dest='val_frq',
-                        type=int, default=10, help='Validation frequency.')
+                        type=int, default=5, help='Validation frequency.')
     parser.add_argument('-s', '--patch-size', dest='patchsz', type=int,
                         default=256, help='Size of training patch')
     parser.add_argument('-c', '--checkpoint-period', dest='chkpointperiod',
@@ -198,17 +287,20 @@ def get_args():
     parser.add_argument('-ldp', '--learning-rate-drop-period', dest='lrdp',
                         type=int, default=75, help='Learning rate drop period')
     parser.add_argument('-ntrd', '--training_dir_in', dest='in_trdir',
-                        default='E:/sRGB-XYZ-dataset/sRGB_training/',
+                        default='../sRGB2XYZ_training/sRGB_training/',
                         help='Input training image directory')
     parser.add_argument('-gtrd', '--training_dir_gt', dest='gt_trdir',
-                        default='E:/sRGB-XYZ-dataset/XYZ_training/',
+                        default='../sRGB2XYZ_training/XYZ_training/',
                         help='Ground truth training image directory')
     parser.add_argument('-nvld', '--validation_dir_in', dest='in_vldir',
-                        default='E:/sRGB-XYZ-dataset/sRGB_validation/',
+                        default='../sRGB2XYZ_validation/sRGB_validation/',
                         help='Input validation image directory')
     parser.add_argument('-gvld', '--validation_dir_gt', dest='gt_vldir',
-                        default='E:/sRGB-XYZ-dataset/XYZ_validation/',
+                        default='../sRGB2XYZ_validation/XYZ_validation/',
                         help='Ground truth validation image directory')
+    parser.add_argument('-state', '--net_state', dest='state',
+                        default='orig',
+                        help='self supervised or original state')
 
     return parser.parse_args()
 
@@ -220,7 +312,7 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    net = sRGB2XYZ.CIEXYZNet(device=device)
+    net = sRGB2XYZ.CIEXYZNet(device=device, state=args.state)
     if args.load:
         net.load_state_dict(
             torch.load(args.load, map_location=device)
@@ -233,12 +325,13 @@ if __name__ == '__main__':
 
 
     try:
+        print(f"\n\n\nUsing state: {args.state}\n\n\n")
         train_net(net=net, device=device, dir_img=args.in_trdir,
                   dir_gt=args.gt_trdir, val_dir=args.in_vldir,
                   val_dir_gt=args.gt_vldir, epochs=args.epochs,
                   batch_size=args.batchsize, lr=args.lr, lrdf=args.lrdf,
                   lrdp=args.lrdp, chkpointperiod=args.chkpointperiod,
-                  validationFrequency=args.val_frq, patchsz=args.patchsz)
+                  validationFrequency=args.val_frq, patchsz=args.patchsz, state=args.state)
     except KeyboardInterrupt:
         torch.save(net.state_dict(), 'intrrupted_check_point.pth')
         logging.info('Saved interrupt checkpoint backup')

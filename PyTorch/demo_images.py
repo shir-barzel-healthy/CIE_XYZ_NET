@@ -19,7 +19,8 @@ import cv2
 import numpy as np
 from src import sRGB2XYZ
 from src import utils
-
+from os import path
+from src import utils
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -30,6 +31,9 @@ def get_args():
     parser.add_argument('--input_dir', '-i', help='Input image directory',
                         dest='input_dir',
                         default='../images/')
+    parser.add_argument('--input_xyz_dir', '-ixyz', help='Input xyz image directory',
+                        dest='xyz_dir',
+                        default='../images/')
     parser.add_argument('--task', '-t', default='srgb-2-xyz-2-srgb',
                         help="Specify the required task: 'srgb-2-xyz-2-srgb', "
                              "'srgb-2-xyz', or 'xyz-2-srgb'.", dest='task')
@@ -38,7 +42,7 @@ def get_args():
                         dest='show')
     parser.add_argument('--save', '-s', action='store_true',
                         help="Save the output images",
-                        default=True, dest='save')
+                        default=False, dest='save')
     parser.add_argument('--device', '-d', default='cuda',
                         help="Device: cuda or cpu.", dest='device')
 
@@ -92,13 +96,23 @@ if __name__ == "__main__":
         if fn.lower().endswith(valid_images):
             imgfiles.append(os.path.join(input_dir, fn))
 
-    for filename in imgfiles:
+    psnr_srgb_list = []
+    psnr_xyz_list = []
+    for i, filename in enumerate(imgfiles):
 
         in_img = cv2.imread(filename)
         if in_img is None:
             raise Exception('Image not found!')
 
-        logging.info(f'Processing image {filename}')
+        # get ground truth images
+        in_dir, filename_xyz = path.split(filename)
+        name, _ = path.splitext(filename_xyz)
+        gt_name = os.path.join(args.xyz_dir, name + '.png')
+        xyz_img = cv2.imread(gt_name, -1)
+
+        # find corr xyz gt
+
+        logging.info(f'Processing image {filename} {i}/{len(imgfiles)}')
 
         in_img_tensor = utils.from_image_to_tensor(in_img).to(
             device=device, dtype=torch.float32)
@@ -110,6 +124,18 @@ if __name__ == "__main__":
             output_sRGB = utils.from_tensor_to_image(output_sRGB, device=device)
             output_XYZ = utils.outOfGamutClipping(output_XYZ)
             output_sRGB = utils.outOfGamutClipping(output_sRGB)
+
+            output_sRGB_scaled = output_sRGB * 255
+            psnr_srgb = utils.PSNR(in_img, output_sRGB_scaled)
+            print(f"PSNR srgb: {psnr_srgb}")
+            psnr_srgb_list.append(psnr_srgb)
+            
+            xyz_img = utils.from_bgr2rgb(xyz_img)  # convert from BGR to RGB
+            xyz_img = utils.im2double(xyz_img)  # convert to double
+
+            psnr_xyz = utils.PSNR(xyz_img, output_XYZ)
+            print(f"PSNR xyz: {psnr_xyz}")
+            psnr_xyz_list.append(psnr_xyz)
 
             if args.show:
                 logging.info("Visualizing results for image:"
@@ -166,5 +192,10 @@ if __name__ == "__main__":
                                             '_sRGB_re-rendered.png')
                 output_sRGB = output_sRGB * 255
                 cv2.imwrite(outsrgb_name, output_sRGB.astype(np.uint8))
+
+    mean_srgb = np.mean(np.array(psnr_srgb_list))
+    mean_xyz = np.mean(np.array(psnr_xyz_list))
+    print(f"Mean srgb: {mean_srgb}")
+    print(f"Mean xyz: {mean_xyz}")
 
 

@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "train",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/shir.barzel/CIE_XYZ_NET/PyTorch/train.py",
+            "console": "integratedTerminal",
+            "args": ["-l",
+                     "/home/shir.barzel/CIE_XYZ_NET/PyTorch/models/model_sRGB-XYZ-sRGB.pth",
+                     "-ntrd",
+                     "/home/shir.barzel/CIE_XYZ_NET/dataset/sRGB_training",
+                     "-gtrd",
+                     "/home/shir.barzel/CIE_XYZ_NET/dataset/XYZ_training",
+                     "-nvld", 
+                     "/home/shir.barzel/CIE_XYZ_NET/dataset/sRGB_validation",
+                     "-gvld",
+                     "/home/shir.barzel/CIE_XYZ_NET/dataset/XYZ_validation",
+                     "-vf",
+                     "1",
+                     "-state",
+                     "self-sup"
+            ]
+        },
+        {
+            "name": "demo_images",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/shir.barzel/CIE_XYZ_NET/PyTorch/demo_images.py",
+            "console": "integratedTerminal",
+            "args": ["-m",
+                     "/home/shir.barzel/CIE_XYZ_NET/PyTorch/models/",
+                     "-i",
+                     "/home/shir.barzel/CIE_XYZ_NET/dataset/sRGB_testing"
+                     "-ixyz",
+                     "/home/shir.barzel/CIE_XYZ_NET/dataset/XYZ_testing",
+            ]
+        }, 
+    ]
+}
