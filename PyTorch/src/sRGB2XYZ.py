@@ -18,7 +18,7 @@ from .global_net import *
 class CIEXYZNet(nn.Module):
     def __init__(self, device='cuda', localdepth=16, local_convdepth=32,
                  globaldepth=5, global_convdepth=64,
-                 global_in=128, scale=0.25):
+                 global_in=128, scale=0.25, state='orig'):
         super(CIEXYZNet, self).__init__()
         self.localdepth = localdepth
         self.local_convdepth = local_convdepth
@@ -27,6 +27,7 @@ class CIEXYZNet(nn.Module):
         self.global_in = global_in
         self.scale = scale
         self.device = device
+        self.state = state
         self.srgb2xyz_local_net = localSubNet(
             blockDepth=self.localdepth, convDepth=self.local_convdepth,
             scale=self.scale)
@@ -67,23 +68,43 @@ class CIEXYZNet(nn.Module):
                 torch.reshape(torch.squeeze(x[i, :, :, :]), (3, -1))))
             y[i, :, :, :] = torch.reshape(temp, (x.size(1), x.size(2),
                                                  x.size(3)))
-
-        return y
+        if self.state == 'orig':
+            return y
+        elif self.state == 'self-sup':
+            return y, m
 
     def forward_srgb2xyz(self, srgb):
         l_xyz = srgb - self.forward_local(srgb, target='xyz')
-        xyz = self.forward_global(l_xyz, target='xyz')
-        return xyz
+        if self.state == 'orig':
+            xyz = self.forward_global(l_xyz, target='xyz')
+            return xyz
+        elif self.state == 'self-sup':
+            xyz, m = self.forward_global(l_xyz, target='xyz')
+            return xyz, m
 
     def forward_xyz2srgb(self, xyz):
-        g_srgb = self.forward_global(xyz, target='srgb')
-        srgb = g_srgb + self.forward_local(g_srgb, target='srgb')
-        return srgb
+        if self.state == 'orig':
+            g_srgb = self.forward_global(xyz, target='srgb')
+            srgb = g_srgb + self.forward_local(g_srgb, target='srgb')
+            return srgb
+        elif self.state == 'self-sup':
+            g_srgb, m = self.forward_global(xyz, target='srgb')
+            srgb = g_srgb + self.forward_local(g_srgb, target='srgb')
+            return srgb, m
 
     def forward(self, x):
-        xyz = self.forward_srgb2xyz(x)
-        srgb = self.forward_xyz2srgb(xyz)
-        return xyz, srgb
+        if self.state == 'orig':
+            xyz = self.forward_srgb2xyz(x)
+            srgb = self.forward_xyz2srgb(xyz)
+            return xyz, srgb
+        elif self.state == 'self-sup':
+            x_1 = torch.squeeze(x[:, 0, :, :, :])
+            x_2 = torch.squeeze(x[:, 1, :, :, :])
+            xyz_1, m_inv_1 = self.forward_srgb2xyz(x_1)
+            srgb_1, m_fwd_1 = self.forward_xyz2srgb(xyz_1)
+            xyz_2, m_inv_2 = self.forward_srgb2xyz(x_2)
+            srgb_2, m_fwd_2 = self.forward_xyz2srgb(xyz_2)
+            return xyz_1, srgb_1, m_inv_1, m_fwd_1, xyz_2, srgb_2, m_inv_2, m_fwd_2
 
     @staticmethod
     def kernel(x):

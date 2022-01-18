@@ -23,10 +23,11 @@ from src import utils
 
 
 class BasicDataset(Dataset):
-    def __init__(self, imgs_dir, xyz_dir, patch_size=256):
+    def __init__(self, imgs_dir, xyz_dir, patch_size=256, state='orig'):
         self.imgs_dir = imgs_dir
         self.xyz_dir = xyz_dir
         self.patch_size = patch_size
+        self.state = state
         logging.info('Loading training images information...')
         self.imgfiles = [join(imgs_dir, file) for file in listdir(
             imgs_dir) if not file.startswith('.')]
@@ -37,11 +38,11 @@ class BasicDataset(Dataset):
 
     @classmethod
     def preprocess(cls, img, patch_size, w, h, patch_coords, aug_op, scale=1):
-        if aug_op is 1:
+        if aug_op == 1:
             img = cv2.flip(img, 0)
-        elif aug_op is 2:
+        elif aug_op == 2:
             img = cv2.flip(img, 1)
-        elif aug_op is 3:
+        elif aug_op == 3:
             img = cv2.resize(img, (int(w * scale), int(h * scale)))
 
         img_nd = np.array(img)
@@ -67,19 +68,49 @@ class BasicDataset(Dataset):
         xyz_img = cv2.imread(gt_name, -1)
         xyz_img = utils.from_bgr2rgb(xyz_img)  # convert from BGR to RGB
         xyz_img = utils.im2double(xyz_img)  # convert to double
-        # get augmentation option
-        aug_op = np.random.randint(4)
-        if aug_op == 3:
-            scale = np.random.uniform(low=1.0, high=1.2)
-        else:
-            scale = 1
-        # get random patch coord
-        patch_x = np.random.randint(0, high=w - self.patch_size)
-        patch_y = np.random.randint(0, high=h - self.patch_size)
-        in_img_patch = self.preprocess(in_img, self.patch_size, w, h, (
-            patch_x, patch_y), aug_op, scale=scale)
-        xyz_patch = self.preprocess(xyz_img, self.patch_size, w, h, (
-            patch_x, patch_y), aug_op, scale=scale)
 
-        return {'image': torch.from_numpy(in_img_patch), 'gt_xyz':
-            torch.from_numpy(xyz_patch)}
+        if self.state == 'orig':
+            # get augmentation option
+            aug_op = np.random.randint(4)
+            if aug_op == 3:
+                scale = np.random.uniform(low=1.0, high=1.2)
+            else:
+                scale = 1
+            # get random patch coord
+            patch_x = np.random.randint(0, high=w - self.patch_size)
+            patch_y = np.random.randint(0, high=h - self.patch_size)
+            in_img_patch = self.preprocess(in_img, self.patch_size, w, h, (
+                patch_x, patch_y), aug_op, scale=scale)
+            xyz_patch = self.preprocess(xyz_img, self.patch_size, w, h, (
+                patch_x, patch_y), aug_op, scale=scale)
+
+            return {'image': torch.from_numpy(in_img_patch), 'gt_xyz':
+                torch.from_numpy(xyz_patch)}
+
+        elif self.state == 'self-sup':
+                        # in_img_patch_arr = np.zeros((2, 3, self.patch_size, self.patch_size))
+            # xyz_patch_arr = np.zeros((2, 3, self.patch_size, self.patch_size))
+
+            in_img_patch_list = []
+            xyz_patch_list = []
+            for i in range(2):
+                # get augmentation option
+                aug_op = np.random.randint(4)
+                if aug_op == 3:
+                    scale = np.random.uniform(low=1.0, high=1.2)
+                else:
+                    scale = 1
+                # get random patch coord
+                patch_x = np.random.randint(0, high=w - self.patch_size)
+                patch_y = np.random.randint(0, high=h - self.patch_size)
+                in_img_patch = self.preprocess(in_img, self.patch_size, w, h, (
+                    patch_x, patch_y), aug_op, scale=scale)
+                xyz_patch = self.preprocess(xyz_img, self.patch_size, w, h, (
+                    patch_x, patch_y), aug_op, scale=scale)
+                in_img_patch_list.append(in_img_patch)
+                xyz_patch_list.append(xyz_patch)
+
+            in_img_patch_list = torch.from_numpy(np.array(in_img_patch_list))
+            xyz_patch_list = torch.from_numpy(np.array(xyz_patch_list))
+
+            return {'image': in_img_patch_list, 'gt_xyz': xyz_patch_list}

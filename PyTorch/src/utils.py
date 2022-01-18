@@ -15,6 +15,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import cv2
+from math import sqrt,log10
+
+def PSNR(original, recon):
+    if type(original).__module__ != np.__name__:
+        original = np.array(original.cpu())
+        recon = np.array(recon.cpu())
+    mse = np.mean((original - recon) ** 2)
+    if(mse == 0):  # MSE is zero means no noise is present in the signal .
+                  # Therefore PSNR have no importance.
+        return 100
+    max_pixel = 255 ##np.max(original)  ## TODO
+    psnr = 20 * log10(max_pixel / sqrt(mse))
+    return psnr
 
 def outOfGamutClipping(I):
     """ Clips out-of-gamut pixels. """
@@ -22,6 +35,29 @@ def outOfGamutClipping(I):
     I[I < 0] = 0  # any pixel is below 0, clip it to 0
     return I
 
+
+def compute_loss_self_sup(imgs, xyz_gt, rec_1, rend_1, m_inv_1,
+                 m_fwd_1, rec_2, rend_2, m_inv_2, m_fwd_2):
+    srgb_gt_1 = torch.squeeze(imgs[:, 0, :, :, :])
+    srgb_gt_2 = torch.squeeze(imgs[:, 1, :, :, :])
+
+    xyz_gt_1 = torch.squeeze(xyz_gt[:, 0, :, :, :])
+    xyz_gt_2 = torch.squeeze(xyz_gt[:, 1, :, :, :])
+
+    loss_m_inv = torch.norm(m_inv_1 - m_inv_2, p='fro', dim=[1, 2]) ## TODO optimization - rewrite norm
+    loss_m_fwd = torch.norm(m_fwd_1 - m_fwd_2, p='fro', dim=[1, 2])
+
+    # m_fac = 1e5 ## TODO
+
+    loss_m = torch.sum(loss_m_inv +
+                    loss_m_fwd) / xyz_gt_1.size(0)
+    loss_1 = torch.sum(torch.abs(srgb_gt_1 - rend_1) + ( ## TODO maybe change to 0.4 and 0.6
+        1.5 * torch.abs(xyz_gt_1 - rec_1))) / xyz_gt_1.size(0)
+    loss_2 = torch.sum(torch.abs(srgb_gt_2 - rend_2) + (
+        1.5 * torch.abs(xyz_gt_2 - rec_2))) / xyz_gt_2.size(0)
+
+    loss_tot = (loss_1 + loss_2) / 2
+    return loss_tot, loss_m
 
 def compute_loss(input, target_xyz, rec_xyz, rendered):
     loss = torch.sum(torch.abs(input - rendered) + (
