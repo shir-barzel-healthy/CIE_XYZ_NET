@@ -21,13 +21,14 @@ from src import sRGB2XYZ
 from src import utils
 from os import path
 from src import utils
+import pickle
 
 def get_args():
     parser = argparse.ArgumentParser(
         description='Converting from sRGB to CIE XYZ and back.')
-    parser.add_argument('--model_dir', '-m', default='./models',
+    parser.add_argument('--model_path', '-m', default='/home/shir.barzel/CIE_XYZ_NET/models/model_sRGB-XYZ-sRGB.pth',
                         help="Specify the directory of the trained model.",
-                        dest='model_dir')
+                        dest='model_path')
     parser.add_argument('--input_dir', '-i', help='Input image directory',
                         dest='input_dir',
                         default='../images/')
@@ -76,14 +77,15 @@ if __name__ == "__main__":
         if not os.path.exists(out_dir['re-rendered']):
             os.mkdir(out_dir['re-rendered'])
 
-    if os.path.exists(os.path.join(args.model_dir, 'model_sRGB-XYZ-sRGB.pth')):
+    if os.path.exists(args.model_path):
         ciexyzNet = sRGB2XYZ.CIEXYZNet(device=device)
-        logging.info("Loading model {}".format(os.path.join(
-            args.model_dir, 'model_sRGB-XYZ-sRGB.pth')))
+        logging.info("Loading model {}".format(args.model_path))
         ciexyzNet.to(device=device)
-        ciexyzNet.load_state_dict(
-            torch.load(os.path.join(args.model_dir, 'model_sRGB-XYZ-sRGB.pth'),
-                       map_location=device))
+        try:
+            checkpoint = torch.load(args.model_path)
+            ciexyzNet.load_state_dict(checkpoint['model_state_dict'])
+        except:
+            ciexyzNet.load_state_dict(torch.load(args.model_path))
 
     else:
         raise Exception('Model not found!')
@@ -195,7 +197,16 @@ if __name__ == "__main__":
 
     mean_srgb = np.mean(np.array(psnr_srgb_list))
     mean_xyz = np.mean(np.array(psnr_xyz_list))
+
     print(f"Mean srgb: {mean_srgb}")
     print(f"Mean xyz: {mean_xyz}")
+
+    dict = {"srgb": psnr_srgb_list, "xyz": psnr_xyz_list}
+    split = args.model_path.split('.')
+    pickle_path = f'{split[0]}.{split[1]}.pickle'
+    file_to_write = open(pickle_path, "wb")
+    pickle.dump(dict, file_to_write)
+
+
 
 

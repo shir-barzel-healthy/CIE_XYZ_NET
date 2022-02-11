@@ -95,7 +95,8 @@ class BasicDataset(Dataset):
             xyz_patch_list = []
             for i in range(2):
                 # get augmentation option
-                aug_op = np.random.randint(4)
+                # aug_op = np.random.randint(3)
+                aug_op = 0
                 if aug_op == 3:
                     scale = np.random.uniform(low=1.0, high=1.2)
                 else:
